@@ -53,37 +53,36 @@ export type Primitives = string | number | boolean | bigint | symbol | null | un
 export const deepCopy = <T extends ((object | Date) & { toJSON?: () => string }) | Primitives>(
 	source: T,
 	hash = new WeakMap(),
-	path = '',
 ): T => {
-	const hasOwnProp = Object.prototype.hasOwnProperty.bind(source);
 	// Primitives & Null & Function
 	if (typeof source !== 'object' || source === null || typeof source === 'function') {
 		return source;
 	}
 	// Date and other objects with toJSON method
 	// TODO: remove this when other code parts not expecting objects with `.toJSON` method called and add back checking for Date and cloning it properly
-	if (typeof source.toJSON === 'function') {
-		return source.toJSON() as T;
+	const src = source as any;
+	if (typeof src.toJSON === 'function') {
+		return src.toJSON() as T;
 	}
 	if (hash.has(source)) {
 		return hash.get(source);
 	}
 	// Array
-	if (Array.isArray(source)) {
-		const clone = [];
-		const len = source.length;
+	if (Array.isArray(src)) {
+		const len = src.length;
+		const clone = new Array(len);
 		for (let i = 0; i < len; i++) {
-			clone[i] = deepCopy(source[i], hash, path + `[${i}]`);
+			clone[i] = deepCopy(src[i], hash);
 		}
 		return clone as T;
 	}
 	// Object
-	const clone = Object.create(Object.getPrototypeOf({}));
+	const clone: any = {};
 	hash.set(source, clone);
-	for (const i in source) {
-		if (hasOwnProp(i)) {
-			clone[i] = deepCopy((source as any)[i], hash, path + `.${i}`);
-		}
+	const keys = Object.keys(src);
+	for (let i = 0, len = keys.length; i < len; i++) {
+		const key = keys[i];
+		clone[key] = deepCopy(src[key], hash);
 	}
 	return clone;
 };
