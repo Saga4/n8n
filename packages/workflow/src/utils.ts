@@ -11,6 +11,12 @@ import { ManualExecutionCancelledError } from './errors/execution-cancelled.erro
 import type { BinaryFileType, IDisplayOptions, INodeProperties, JsonObject } from './interfaces';
 import * as LoggerProxy from './logger-proxy';
 
+const MAX_CACHE_SIZE = 128;
+
+const _parseJSCache: Map<string, object> = new Map();
+
+const _repairCache: Map<string, string> = new Map();
+
 const readStreamClasses = new Set(['ReadStream', 'Readable', 'ReadableStream']);
 
 // NOTE: BigInt.prototype.toJSON is not available, which causes JSON.stringify to throw an error
@@ -121,12 +127,46 @@ function syntaxNodeToValue(expression?: SyntaxNode | null): unknown {
  * - unquoted keys
  */
 function parseJSObject(objectAsString: string): object {
-	const jsExpression = esprimaParse(`(${objectAsString})`).body.find(
-		(node): node is ExpressionStatement =>
-			node.type === Syntax.ExpressionStatement && node.expression.type === Syntax.ObjectExpression,
-	);
+	// use small cache to avoid re-parsing the same string
+	const cached = _parseJSCache.get(objectAsString);
+	if (cached !== undefined) {
+		return cached;
+	}
 
-	return syntaxNodeToValue(jsExpression?.expression) as object;
+	// Esprima can be heavy; restrict output to essentials to reduce parsing cost.
+	// Keep tolerant parsing to help with minor syntax differences.
+	const code = `(${objectAsString})`;
+	// Provide explicit parse options to avoid collecting unnecessary data (comments, tokens, ranges, loc).
+	const program = esprimaParse(code, {
+		range: false,
+		loc: false,
+		comment: false,
+		tokens: false,
+		tolerant: true,
+		jsx: false,
+	});
+
+	// Avoid .find with closure allocation: use a for loop to locate ExpressionStatement > ObjectExpression
+	let jsExpression: ExpressionStatement | undefined;
+	for (let i = 0, len = program.body.length; i < len; i++) {
+		const node = program.body[i] as SyntaxNode;
+		if (node.type === Syntax.ExpressionStatement) {
+			// Accessing node.expression without repeated property lookups
+			const expr = (node as ExpressionStatement).expression as SyntaxNode;
+			if (expr && expr.type === Syntax.ObjectExpression) {
+				jsExpression = node as ExpressionStatement;
+				break;
+			}
+		}
+	}
+
+	const result = syntaxNodeToValue(jsExpression?.expression) as object;
+	_parseJSCache.set(objectAsString, result);
+	if (_parseJSCache.size > MAX_CACHE_SIZE) {
+		const firstKey = _parseJSCache.keys().next().value;
+		_parseJSCache.delete(firstKey);
+	}
+	return result;
 }
 
 type MutuallyExclusive<T, U> =
@@ -150,32 +190,56 @@ type JSONParseOptions<T> = { acceptJSObject?: boolean; repairJSON?: boolean } & 
  * @returns {Object} - The parsed object, or the fallback value if parsing fails and `fallbackValue` is set.
  */
 export const jsonParse = <T>(jsonString: string, options?: JSONParseOptions<T>): T => {
+	// Cache local reference to avoid repeated optional chaining cost
+	const opts = options as JSONParseOptions<T> | undefined;
+
 	try {
 		return JSON.parse(jsonString) as T;
 	} catch (error) {
-		if (options?.acceptJSObject) {
+		if (opts?.acceptJSObject) {
 			try {
+				// small cache to avoid reparsing the same JS object strings
+				const cached = _parseJSCache.get(jsonString);
+				if (cached !== undefined) {
+					return cached as T;
+				}
 				const jsonStringCleaned = parseJSObject(jsonString);
+				// maintain bounded cache
+				_parseJSCache.set(jsonString, jsonStringCleaned as object);
+				if (_parseJSCache.size > MAX_CACHE_SIZE) {
+					// delete oldest
+					const firstKey = _parseJSCache.keys().next().value;
+					_parseJSCache.delete(firstKey);
+				}
 				return jsonStringCleaned as T;
 			} catch (e) {
 				// Ignore this error and return the original error or the fallback value
 			}
 		}
-		if (options?.repairJSON) {
+		if (opts?.repairJSON) {
 			try {
-				const jsonStringCleaned = jsonrepair(jsonString);
+				// small cache for jsonrepair results
+				let jsonStringCleaned = _repairCache.get(jsonString);
+				if (jsonStringCleaned === undefined) {
+					jsonStringCleaned = jsonrepair(jsonString);
+					_repairCache.set(jsonString, jsonStringCleaned);
+					if (_repairCache.size > MAX_CACHE_SIZE) {
+						const firstKey = _repairCache.keys().next().value;
+						_repairCache.delete(firstKey);
+					}
+				}
 				return JSON.parse(jsonStringCleaned) as T;
 			} catch (e) {
 				// Ignore this error and return the original error or the fallback value
 			}
 		}
-		if (options?.fallbackValue !== undefined) {
-			if (options.fallbackValue instanceof Function) {
-				return options.fallbackValue();
+		if (opts?.fallbackValue !== undefined) {
+			if (opts.fallbackValue instanceof Function) {
+				return opts.fallbackValue();
 			}
-			return options.fallbackValue;
-		} else if (options?.errorMessage) {
-			throw new ApplicationError(options.errorMessage);
+			return opts.fallbackValue;
+		} else if (opts?.errorMessage) {
+			throw new ApplicationError(opts.errorMessage);
 		}
 
 		throw error;
@@ -339,7 +403,8 @@ export function randomInt(min: number, max?: number): number {
 		max = min;
 		min = 0;
 	}
-	return min + (crypto.getRandomValues(new Uint32Array(1))[0] % (max - min));
+	const range = max - min;
+	return min + (crypto.getRandomValues(new Uint32Array(1))[0] % range);
 }
 
 export function randomString(length: number): string;
@@ -353,9 +418,14 @@ export function randomString(minLength: number, maxLength: number): string;
  */
 export function randomString(minLength: number, maxLength?: number): string {
 	const length = maxLength === undefined ? minLength : randomInt(minLength, maxLength + 1);
-	return [...crypto.getRandomValues(new Uint32Array(length))]
-		.map((byte) => ALPHABET[byte % ALPHABET.length])
-		.join('');
+	const values = crypto.getRandomValues(new Uint32Array(length));
+	const alpha = ALPHABET;
+	const alphaLen = alpha.length;
+	const out: string[] = new Array(length);
+	for (let i = 0; i < length; i++) {
+		out[i] = alpha[values[i] % alphaLen];
+	}
+	return out.join('');
 }
 
 /**
