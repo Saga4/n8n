@@ -339,7 +339,8 @@ export function randomInt(min: number, max?: number): number {
 		max = min;
 		min = 0;
 	}
-	return min + (crypto.getRandomValues(new Uint32Array(1))[0] % (max - min));
+	const range = max - min;
+	return min + (crypto.getRandomValues(new Uint32Array(1))[0] % range);
 }
 
 export function randomString(length: number): string;
@@ -353,9 +354,14 @@ export function randomString(minLength: number, maxLength: number): string;
  */
 export function randomString(minLength: number, maxLength?: number): string {
 	const length = maxLength === undefined ? minLength : randomInt(minLength, maxLength + 1);
-	return [...crypto.getRandomValues(new Uint32Array(length))]
-		.map((byte) => ALPHABET[byte % ALPHABET.length])
-		.join('');
+	const values = crypto.getRandomValues(new Uint32Array(length));
+	const alpha = ALPHABET;
+	const alphaLen = alpha.length;
+	const out: string[] = new Array(length);
+	for (let i = 0; i < length; i++) {
+		out[i] = alpha[values[i] % alphaLen];
+	}
+	return out.join('');
 }
 
 /**
