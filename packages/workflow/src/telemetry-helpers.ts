@@ -106,17 +106,28 @@ function areOverlapping(
 const URL_PARTS_REGEX = /(?<protocolPlusDomain>.*?\..*?)(?<pathname>\/.*)/;
 
 export function getDomainBase(raw: string, urlParts = URL_PARTS_REGEX): string {
-	try {
-		const url = new URL(raw);
+	// fast-path: empty input
+	if (!raw) return '';
 
-		return [url.protocol, url.hostname].join('//');
-	} catch {
-		const match = urlParts.exec(raw);
+	// Only attempt URL parsing if a scheme is present (cheap test).
+	// This avoids expensive exceptions for common inputs that are relative/host-only.
+	const schemeTest = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+	if (schemeTest.test(raw)) {
+		try {
+			const url = new URL(raw);
 
-		if (!match?.groups?.protocolPlusDomain) return '';
-
-		return match.groups.protocolPlusDomain;
+			// use string concatenation to avoid allocating a temporary array
+			return url.protocol + '//' + url.hostname;
+		} catch {
+			// fall through to regex fallback if URL parsing fails
+		}
 	}
+
+	const match = urlParts.exec(raw);
+
+	if (!match?.groups?.protocolPlusDomain) return '';
+
+	return match.groups.protocolPlusDomain;
 }
 
 function isSensitive(segment: string) {
