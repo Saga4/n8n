@@ -16,71 +16,124 @@ export function compareConnections(prev: IConnections, next: IConnections): Conn
 	const added: Record<string, INodeConnectionsDiff> = {};
 	const removed: Record<string, INodeConnectionsDiff> = {};
 
-	// Get all unique node names from both connection objects
-	const allNodeNames = new Set([...Object.keys(prev), ...Object.keys(next)]);
+	// Iterate prev node names first, then any node names that only exist in next.
+	const prevNodeNames = Object.keys(prev);
+	const nextNodeNames = Object.keys(next);
 
-	for (const nodeName of allNodeNames) {
-		const prevNodeConnections = prev[nodeName] ?? {};
-		const nextNodeConnections = next[nodeName] ?? {};
+	const seenNodes: Record<string, true> = Object.create(null);
+	for (let i = 0, len = prevNodeNames.length; i < len; i++) {
+		seenNodes[prevNodeNames[i]] = true;
+	}
 
-		// Get all unique input names for this node
-		const allInputNames = new Set([
-			...Object.keys(prevNodeConnections),
-			...Object.keys(nextNodeConnections),
-		]);
+	const EMPTY_ARR: any[] = [];
 
-		for (const inputName of allInputNames) {
-			const prevInputConnections = prevNodeConnections[inputName] ?? [];
-			const nextInputConnections = nextNodeConnections[inputName] ?? [];
+	// Helper to diff all inputs for a single node
+	function processNode(nodeName: string, prevNodeConnections: Record<string, any>, nextNodeConnections: Record<string, any>) {
+		const prevInputNames = Object.keys(prevNodeConnections);
+		const nextInputNames = Object.keys(nextNodeConnections);
 
-			// Compare each source index
-			const maxLength = Math.max(prevInputConnections.length, nextInputConnections.length);
+		const seenInputs: Record<string, true> = Object.create(null);
+		for (let j = 0, jlen = prevInputNames.length; j < jlen; j++) {
+			seenInputs[prevInputNames[j]] = true;
+		}
 
-			for (let sourceIndex = 0; sourceIndex < maxLength; sourceIndex++) {
-				const prevConnections = prevInputConnections[sourceIndex] ?? [];
-				const nextConnections = nextInputConnections[sourceIndex] ?? [];
+		// Process inputs that exist in prev (and possibly in next)
+		for (let j = 0, jlen = prevInputNames.length; j < jlen; j++) {
+			processInput(nodeName, prevNodeConnections, nextNodeConnections, prevInputNames[j]);
+		}
 
-				// Build maps for easier comparison
-				const prevMap = new Map(
-					prevConnections.map((conn, idx) => [
-						JSON.stringify(conn),
-						{ index: idx, connection: conn },
-					]),
-				);
-				const nextMap = new Map(
-					nextConnections.map((conn, idx) => [
-						JSON.stringify(conn),
-						{ index: idx, connection: conn },
-					]),
-				);
+		// Process inputs that only exist in next
+		for (let j = 0, jlen = nextInputNames.length; j < jlen; j++) {
+			const inputName = nextInputNames[j];
+			if (seenInputs[inputName]) continue;
+			processInput(nodeName, prevNodeConnections, nextNodeConnections, inputName);
+		}
+	}
 
-				// Find added connections
-				for (const [key, value] of nextMap) {
-					if (!prevMap.has(key)) {
-						if (!added[nodeName]) added[nodeName] = {};
-						if (!added[nodeName][inputName]) added[nodeName][inputName] = [];
+	// Helper to diff a single input (handles varying sourceIndex lengths)
+	function processInput(nodeName: string, prevNodeConnections: Record<string, any>, nextNodeConnections: Record<string, any>, inputName: string) {
+		const prevInputConnections = (prevNodeConnections[inputName] as any[]) ?? EMPTY_ARR;
+		const nextInputConnections = (nextNodeConnections[inputName] as any[]) ?? EMPTY_ARR;
 
-						added[nodeName][inputName].push({
-							sourceIndex,
-							value,
-						});
+		const maxLength = prevInputConnections.length > nextInputConnections.length
+			? prevInputConnections.length
+			: nextInputConnections.length;
+
+		for (let sourceIndex = 0; sourceIndex < maxLength; sourceIndex++) {
+			const prevConnections = prevInputConnections[sourceIndex] ?? EMPTY_ARR;
+			const nextConnections = nextInputConnections[sourceIndex] ?? EMPTY_ARR;
+
+			// Build map for prevConnections once
+			const prevMap = new Map<string, { index: number; connection: IConnection }>();
+			for (let p = 0, plen = prevConnections.length; p < plen; p++) {
+				const conn = prevConnections[p];
+				prevMap.set(JSON.stringify(conn), { index: p, connection: conn });
+			}
+
+			// Check nextConnections against prevMap to find additions.
+			for (let n = 0, nlen = nextConnections.length; n < nlen; n++) {
+				const conn = nextConnections[n];
+				const key = JSON.stringify(conn);
+				const prevEntry = prevMap.get(key);
+				if (prevEntry === undefined) {
+					let addedNode = added[nodeName];
+					if (!addedNode) {
+						addedNode = {};
+						added[nodeName] = addedNode;
 					}
-				}
-
-				// Find removed connections
-				for (const [key, value] of prevMap) {
-					if (!nextMap.has(key)) {
-						if (!removed[nodeName]) removed[nodeName] = {};
-						if (!removed[nodeName][inputName]) removed[nodeName][inputName] = [];
-
-						removed[nodeName][inputName].push({
-							sourceIndex,
-							value,
-						});
+					let addedInput = addedNode[inputName];
+					if (!addedInput) {
+						addedInput = [];
+						addedNode[inputName] = addedInput;
 					}
+					addedInput.push({
+						sourceIndex,
+						value: { index: n, connection: conn },
+					});
+				} else {
+					// Matched, remove from prevMap so remaining entries are removals.
+					prevMap.delete(key);
 				}
 			}
+
+			// Remaining entries in prevMap are removed.
+			if (prevMap.size) {
+				let removedNode = removed[nodeName];
+				if (!removedNode) {
+					removedNode = {};
+					removed[nodeName] = removedNode;
+				}
+				let removedInput = removedNode[inputName];
+				if (!removedInput) {
+					removedInput = [];
+					removedNode[inputName] = removedInput;
+				}
+
+				prevMap.forEach((value) => {
+					removedInput.push({
+						sourceIndex,
+						value,
+					});
+				});
+			}
 		}
+	}
+
+	// Process nodes present in prev (covers nodes present in both)
+	for (let i = 0, len = prevNodeNames.length; i < len; i++) {
+		const nodeName = prevNodeNames[i];
+		const prevNodeConnections = prev[nodeName] ?? {};
+		const nextNodeConnections = next[nodeName] ?? {};
+		processNode(nodeName, prevNodeConnections, nextNodeConnections);
+	}
+
+	// Process nodes only present in next
+	for (let i = 0, len = nextNodeNames.length; i < len; i++) {
+		const nodeName = nextNodeNames[i];
+		if (seenNodes[nodeName]) continue;
+		const prevNodeConnections = prev[nodeName] ?? {};
+		const nextNodeConnections = next[nodeName] ?? {};
+		processNode(nodeName, prevNodeConnections, nextNodeConnections);
 	}
 
 	return { added, removed };
