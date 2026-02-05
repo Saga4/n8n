@@ -12,17 +12,23 @@ export function mapConnectionsByDestination(connections: IConnections) {
 			continue;
 		}
 
-		for (const type of Object.keys(connections[sourceNode]) as NodeConnectionType[]) {
-			if (!connections[sourceNode].hasOwnProperty(type)) {
+		const srcConns = connections[sourceNode];
+		for (const type in srcConns) {
+			if (!srcConns.hasOwnProperty(type)) {
 				continue;
 			}
 
-			for (const inputIndex in connections[sourceNode][type]) {
-				if (!connections[sourceNode][type].hasOwnProperty(inputIndex)) {
+			const inputs = srcConns[type as NodeConnectionType];
+			for (const inputIndex in inputs) {
+				if (!inputs.hasOwnProperty(inputIndex)) {
 					continue;
 				}
 
-				for (connectionInfo of connections[sourceNode][type][inputIndex] ?? []) {
+				const conns = inputs[inputIndex] ?? [];
+				// Use indexed loop for performance; preserve same thrown errors for undefined elements
+				for (let i = 0, len = conns.length; i < len; i++) {
+					connectionInfo = conns[i];
+
 					if (!returnConnection.hasOwnProperty(connectionInfo.node)) {
 						returnConnection[connectionInfo.node] = {};
 					}
@@ -30,12 +36,15 @@ export function mapConnectionsByDestination(connections: IConnections) {
 						returnConnection[connectionInfo.node][connectionInfo.type] = [];
 					}
 
-					maxIndex = returnConnection[connectionInfo.node][connectionInfo.type].length - 1;
+					const destArr = returnConnection[connectionInfo.node][connectionInfo.type];
+					// Ensure the destination array has a slot at connectionInfo.index
+					maxIndex = destArr.length - 1;
+					// Fill missing indexes with empty arrays (matches original logic)
 					for (let j = maxIndex; j < connectionInfo.index; j++) {
-						returnConnection[connectionInfo.node][connectionInfo.type].push([]);
+						destArr.push([]);
 					}
 
-					returnConnection[connectionInfo.node][connectionInfo.type][connectionInfo.index]?.push({
+					destArr[connectionInfo.index]?.push({
 						node: sourceNode,
 						type,
 						index: parseInt(inputIndex, 10),
