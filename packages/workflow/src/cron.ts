@@ -50,23 +50,30 @@ export type TriggerTime =
 	| EveryMonth;
 
 export const toCronExpression = (item: TriggerTime): CronExpression => {
+	// Quick path for custom mode: avoid generating any random values.
+	if (item.mode === 'custom') return item.cronExpression.trim() as CronExpression;
+
+	// Only generate random values when needed, and generate the minimum required.
 	const randomSecond = randomInt(60);
+	const mode = item.mode;
 
-	if (item.mode === 'everyMinute') return `${randomSecond} * * * * *`;
-	if (item.mode === 'everyHour') return `${randomSecond} ${item.minute} * * * *`;
+	if (mode === 'everyMinute') return `${randomSecond} * * * * *`;
+	if (mode === 'everyHour') return `${randomSecond} ${item.minute} * * * *`;
 
-	if (item.mode === 'everyX') {
+	if (mode === 'everyX') {
 		if (item.unit === 'minutes') return `${randomSecond} */${item.value} * * * *`;
 
+		// only generate randomMinute for hours unit
 		const randomMinute = randomInt(60);
 		if (item.unit === 'hours') return `${randomSecond} ${randomMinute} */${item.value} * * *`;
 	}
-	if (item.mode === 'everyDay') return `${randomSecond} ${item.minute} ${item.hour} * * *`;
-	if (item.mode === 'everyWeek')
+	if (mode === 'everyDay') return `${randomSecond} ${item.minute} ${item.hour} * * *`;
+	if (mode === 'everyWeek')
 		return `${randomSecond} ${item.minute} ${item.hour} * * ${item.weekday}`;
 
-	if (item.mode === 'everyMonth')
+	if (mode === 'everyMonth')
 		return `${randomSecond} ${item.minute} ${item.hour} ${item.dayOfMonth} * *`;
 
+	// Fallback (should be unreachable because custom handled above)
 	return item.cronExpression.trim() as CronExpression;
 };
