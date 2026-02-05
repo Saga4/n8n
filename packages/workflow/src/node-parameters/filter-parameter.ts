@@ -208,12 +208,18 @@ function parseRegexPattern(pattern: string): RegExp {
 
 export function arrayContainsValue(array: unknown[], value: unknown, ignoreCase: boolean): boolean {
 	if (ignoreCase && typeof value === 'string') {
-		return array.some((item) => {
+		const target = value.toLocaleLowerCase();
+		for (let i = 0, len = array.length; i < len; i++) {
+			const item = array[i];
 			if (typeof item !== 'string') {
-				return false;
+				continue;
 			}
-			return item.toString().toLocaleLowerCase() === value.toLocaleLowerCase();
-		});
+			// preserve original behavior that used item.toString().toLocaleLowerCase()
+			if (item.toString().toLocaleLowerCase() === target) {
+				return true;
+			}
+		}
+		return false;
 	}
 	return array.includes(value);
 }
@@ -410,13 +416,21 @@ export function executeFilter(
 	value: FilterValue,
 	{ itemIndex }: ExecuteFilterOptions = {},
 ): boolean {
-	const conditionPass = (condition: FilterConditionValue, index: number) =>
-		executeFilterCondition(condition, value.options, { index, itemIndex });
-
-	if (value.combinator === 'and') {
-		return value.conditions.every(conditionPass);
-	} else if (value.combinator === 'or') {
-		return value.conditions.some(conditionPass);
+	const { combinator, conditions, options } = value;
+	if (combinator === 'and') {
+		for (let i = 0, len = conditions.length; i < len; i++) {
+			if (!executeFilterCondition(conditions[i], options, { index: i, itemIndex })) {
+				return false;
+			}
+		}
+		return true;
+	} else if (combinator === 'or') {
+		for (let i = 0, len = conditions.length; i < len; i++) {
+			if (executeFilterCondition(conditions[i], options, { index: i, itemIndex })) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	LoggerProxy.warn(`Unknown filter combinator "${value.combinator as string}"`);
