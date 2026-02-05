@@ -11,6 +11,18 @@ import { ManualExecutionCancelledError } from './errors/execution-cancelled.erro
 import type { BinaryFileType, IDisplayOptions, INodeProperties, JsonObject } from './interfaces';
 import * as LoggerProxy from './logger-proxy';
 
+const hasOwnProperty = Object.prototype.hasOwnProperty;
+
+const ALPHABET_CHARS = ALPHABET.split('');
+
+const ONE_UINT32 = new Uint32Array(1);
+
+const MAX_CACHE_SIZE = 128;
+
+const _parseJSCache: Map<string, object> = new Map();
+
+const _repairCache: Map<string, string> = new Map();
+
 const readStreamClasses = new Set(['ReadStream', 'Readable', 'ReadableStream']);
 
 // NOTE: BigInt.prototype.toJSON is not available, which causes JSON.stringify to throw an error
@@ -37,10 +49,10 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 export const isObjectEmpty = (obj: object | null | undefined): boolean => {
 	if (obj === undefined || obj === null) return true;
 	if (typeof obj === 'object') {
-		if (obj instanceof FormData) return obj.getLengthSync() === 0;
 		if (Array.isArray(obj)) return obj.length === 0;
 		if (obj instanceof Set || obj instanceof Map) return obj.size === 0;
 		if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) return obj.byteLength === 0;
+		if (obj instanceof FormData) return obj.getLengthSync() === 0;
 		if (Symbol.iterator in obj || readStreamClasses.has(obj.constructor.name)) return false;
 		return Object.keys(obj).length === 0;
 	}
@@ -55,7 +67,6 @@ export const deepCopy = <T extends ((object | Date) & { toJSON?: () => string })
 	hash = new WeakMap(),
 	path = '',
 ): T => {
-	const hasOwnProp = Object.prototype.hasOwnProperty.bind(source);
 	// Primitives & Null & Function
 	if (typeof source !== 'object' || source === null || typeof source === 'function') {
 		return source;
@@ -73,16 +84,16 @@ export const deepCopy = <T extends ((object | Date) & { toJSON?: () => string })
 		const clone = [];
 		const len = source.length;
 		for (let i = 0; i < len; i++) {
-			clone[i] = deepCopy(source[i], hash, path + `[${i}]`);
+			clone[i] = deepCopy(source[i], hash);
 		}
 		return clone as T;
 	}
 	// Object
-	const clone = Object.create(Object.getPrototypeOf({}));
+	const clone = Object.create(Object.getPrototypeOf(source));
 	hash.set(source, clone);
 	for (const i in source) {
-		if (hasOwnProp(i)) {
-			clone[i] = deepCopy((source as any)[i], hash, path + `.${i}`);
+		if (hasOwnProperty.call(source, i)) {
+			clone[i] = deepCopy((source as any)[i], hash);
 		}
 	}
 	return clone;
@@ -121,12 +132,46 @@ function syntaxNodeToValue(expression?: SyntaxNode | null): unknown {
  * - unquoted keys
  */
 function parseJSObject(objectAsString: string): object {
-	const jsExpression = esprimaParse(`(${objectAsString})`).body.find(
-		(node): node is ExpressionStatement =>
-			node.type === Syntax.ExpressionStatement && node.expression.type === Syntax.ObjectExpression,
-	);
+	// use small cache to avoid re-parsing the same string
+	const cached = _parseJSCache.get(objectAsString);
+	if (cached !== undefined) {
+		return cached;
+	}
 
-	return syntaxNodeToValue(jsExpression?.expression) as object;
+	// Esprima can be heavy; restrict output to essentials to reduce parsing cost.
+	// Keep tolerant parsing to help with minor syntax differences.
+	const code = `(${objectAsString})`;
+	// Provide explicit parse options to avoid collecting unnecessary data (comments, tokens, ranges, loc).
+	const program = esprimaParse(code, {
+		range: false,
+		loc: false,
+		comment: false,
+		tokens: false,
+		tolerant: true,
+		jsx: false,
+	});
+
+	// Avoid .find with closure allocation: use a for loop to locate ExpressionStatement > ObjectExpression
+	let jsExpression: ExpressionStatement | undefined;
+	for (let i = 0, len = program.body.length; i < len; i++) {
+		const node = program.body[i] as SyntaxNode;
+		if (node.type === Syntax.ExpressionStatement) {
+			// Accessing node.expression without repeated property lookups
+			const expr = (node as ExpressionStatement).expression as SyntaxNode;
+			if (expr && expr.type === Syntax.ObjectExpression) {
+				jsExpression = node as ExpressionStatement;
+				break;
+			}
+		}
+	}
+
+	const result = syntaxNodeToValue(jsExpression?.expression) as object;
+	_parseJSCache.set(objectAsString, result);
+	if (_parseJSCache.size > MAX_CACHE_SIZE) {
+		const firstKey = _parseJSCache.keys().next().value;
+		_parseJSCache.delete(firstKey);
+	}
+	return result;
 }
 
 type MutuallyExclusive<T, U> =
@@ -150,32 +195,56 @@ type JSONParseOptions<T> = { acceptJSObject?: boolean; repairJSON?: boolean } & 
  * @returns {Object} - The parsed object, or the fallback value if parsing fails and `fallbackValue` is set.
  */
 export const jsonParse = <T>(jsonString: string, options?: JSONParseOptions<T>): T => {
+	// Cache local reference to avoid repeated optional chaining cost
+	const opts = options as JSONParseOptions<T> | undefined;
+
 	try {
 		return JSON.parse(jsonString) as T;
 	} catch (error) {
-		if (options?.acceptJSObject) {
+		if (opts?.acceptJSObject) {
 			try {
+				// small cache to avoid reparsing the same JS object strings
+				const cached = _parseJSCache.get(jsonString);
+				if (cached !== undefined) {
+					return cached as T;
+				}
 				const jsonStringCleaned = parseJSObject(jsonString);
+				// maintain bounded cache
+				_parseJSCache.set(jsonString, jsonStringCleaned as object);
+				if (_parseJSCache.size > MAX_CACHE_SIZE) {
+					// delete oldest
+					const firstKey = _parseJSCache.keys().next().value;
+					_parseJSCache.delete(firstKey);
+				}
 				return jsonStringCleaned as T;
 			} catch (e) {
 				// Ignore this error and return the original error or the fallback value
 			}
 		}
-		if (options?.repairJSON) {
+		if (opts?.repairJSON) {
 			try {
-				const jsonStringCleaned = jsonrepair(jsonString);
+				// small cache for jsonrepair results
+				let jsonStringCleaned = _repairCache.get(jsonString);
+				if (jsonStringCleaned === undefined) {
+					jsonStringCleaned = jsonrepair(jsonString);
+					_repairCache.set(jsonString, jsonStringCleaned);
+					if (_repairCache.size > MAX_CACHE_SIZE) {
+						const firstKey = _repairCache.keys().next().value;
+						_repairCache.delete(firstKey);
+					}
+				}
 				return JSON.parse(jsonStringCleaned) as T;
 			} catch (e) {
 				// Ignore this error and return the original error or the fallback value
 			}
 		}
-		if (options?.fallbackValue !== undefined) {
-			if (options.fallbackValue instanceof Function) {
-				return options.fallbackValue();
+		if (opts?.fallbackValue !== undefined) {
+			if (opts.fallbackValue instanceof Function) {
+				return opts.fallbackValue();
 			}
-			return options.fallbackValue;
-		} else if (options?.errorMessage) {
-			throw new ApplicationError(options.errorMessage);
+			return opts.fallbackValue;
+		} else if (opts?.errorMessage) {
+			throw new ApplicationError(opts.errorMessage);
 		}
 
 		throw error;
@@ -339,7 +408,9 @@ export function randomInt(min: number, max?: number): number {
 		max = min;
 		min = 0;
 	}
-	return min + (crypto.getRandomValues(new Uint32Array(1))[0] % (max - min));
+	const range = max - min;
+	crypto.getRandomValues(ONE_UINT32);
+	return min + (ONE_UINT32[0] % range);
 }
 
 export function randomString(length: number): string;
@@ -353,16 +424,33 @@ export function randomString(minLength: number, maxLength: number): string;
  */
 export function randomString(minLength: number, maxLength?: number): string {
 	const length = maxLength === undefined ? minLength : randomInt(minLength, maxLength + 1);
-	return [...crypto.getRandomValues(new Uint32Array(length))]
-		.map((byte) => ALPHABET[byte % ALPHABET.length])
-		.join('');
+
+	// Choose the smallest typed array that can hold indices to reduce memory and improve locality.
+	const alphaLen = ALPHABET_CHARS.length;
+	let values: Uint8Array | Uint16Array | Uint32Array;
+	if (alphaLen <= 0xff) {
+		values = crypto.getRandomValues(new Uint8Array(length));
+	} else if (alphaLen <= 0xffff) {
+		values = crypto.getRandomValues(new Uint16Array(length));
+	} else {
+		values = crypto.getRandomValues(new Uint32Array(length));
+	}
+
+	const alpha = ALPHABET_CHARS;
+	const out: string[] = new Array(length);
+
+	// Cache locals to minimize property lookups in hot loop.
+	for (let i = 0; i < length; i++) {
+		out[i] = alpha[(values as Uint8Array | Uint16Array | Uint32Array)[i] % alphaLen];
+	}
+	return out.join('');
 }
 
 /**
  * Checks if a value is an object with a specific key and provides a type guard for the key.
  */
 export function hasKey<T extends PropertyKey>(value: unknown, key: T): value is Record<T, unknown> {
-	return value !== null && typeof value === 'object' && value.hasOwnProperty(key);
+	return value !== null && typeof value === 'object' && key in value;
 }
 
 const unsafeObjectProperties = new Set([
