@@ -24,11 +24,38 @@ function parseErrorResponseWorkflowMetadata(response: unknown): ISubWorkflowMeta
 }
 
 export function parseErrorMetadata(error: unknown): ISubWorkflowMetadata | undefined {
-	if (hasKey(error, 'errorResponse')) {
-		return parseErrorResponseWorkflowMetadata(error.errorResponse);
+	// Fast path: check if error is an object once
+	if (error === null || typeof error !== 'object') return undefined;
+
+	const errorObj = error as Record<string, unknown>;
+	
+	// Check errorResponse property first
+	if ('errorResponse' in errorObj) {
+		const response = errorObj.errorResponse;
+		if (response !== null && typeof response === 'object') {
+			const responseObj = response as Record<string, unknown>;
+			if ('executionId' in responseObj && 'workflowId' in responseObj) {
+				return {
+					subExecution: {
+						executionId: responseObj.executionId as string,
+						workflowId: responseObj.workflowId as string,
+					},
+					subExecutionsCount: 1,
+				};
+			}
+		}
 	}
 
-	// This accounts for cases where the backend attaches the properties on plain errors
-	// e.g. from custom nodes throwing literal `Error` or `ApplicationError` objects directly
-	return parseErrorResponseWorkflowMetadata(error);
+	// Fallback: check error object directly for subworkflow properties
+	if ('executionId' in errorObj && 'workflowId' in errorObj) {
+		return {
+			subExecution: {
+				executionId: errorObj.executionId as string,
+				workflowId: errorObj.workflowId as string,
+			},
+			subExecutionsCount: 1,
+		};
+	}
+
+	return undefined;
 }
