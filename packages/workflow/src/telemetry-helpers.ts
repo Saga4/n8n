@@ -49,6 +49,8 @@ import { getNodeParameters, isSubNodeType } from './node-helpers';
 import { jsonParse } from './utils';
 import { DEFAULT_EVALUATION_METRIC } from './evaluation-helpers';
 
+const ABSOLUTE_URL_REGEX = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//;
+
 const isNodeApiError = (error: unknown): error is NodeApiError =>
 	typeof error === 'object' && error !== null && 'name' in error && error?.name === 'NodeApiError';
 
@@ -138,22 +140,30 @@ function sanitizeRoute(raw: string, check = isSensitive, char = ANONYMIZATION_CH
  * Return pathname plus query string from URL, anonymizing IDs in route and query params.
  */
 export function getDomainPath(raw: string, urlParts = URL_PARTS_REGEX): string {
-	try {
-		const url = new URL(raw);
+	// Fast-path: only attempt URL parsing if the string looks like an absolute URL.
+	// This avoids the cost of throwing/catching for most non-URL inputs.
+	if (ABSOLUTE_URL_REGEX.test(raw)) {
+		try {
+			const url = new URL(raw);
 
-		if (!url.hostname) throw new ApplicationError('Malformed URL');
+			if (!url.hostname) throw new ApplicationError('Malformed URL');
 
-		return sanitizeRoute(url.pathname);
-	} catch {
-		const match = urlParts.exec(raw);
-
-		if (!match?.groups?.pathname) return '';
-
-		// discard query string
-		const route = match.groups.pathname.split('?').shift() as string;
-
-		return sanitizeRoute(route);
+			return sanitizeRoute(url.pathname);
+		} catch {
+			// fall through to regex-based fallback
+		}
 	}
+
+	const match = urlParts.exec(raw);
+
+	if (!match?.groups?.pathname) return '';
+
+	// discard query string without allocating a split array
+	const pathname = match.groups.pathname;
+	const qIdx = pathname.indexOf('?');
+	const route = qIdx === -1 ? pathname : pathname.slice(0, qIdx);
+
+	return sanitizeRoute(route);
 }
 
 function getNumberOfItemsInRuns(runs: ITaskData[]): number {
