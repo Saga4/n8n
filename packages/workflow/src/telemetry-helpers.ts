@@ -694,33 +694,64 @@ export function resolveVectorStoreMetrics(
 	nodeTypes: INodeTypes,
 	run: IRun,
 ): VectorStoreMetrics | {} {
-	const resolvedNodes = nodes
-		.map((x) => [x, nodeTypes.getByNameAndVersion(x.type, x.typeVersion)] as const)
-		.filter((x) => !!x[1]?.description);
-
-	const vectorStores = resolvedNodes.filter(
-		(x) =>
-			x[1].description.codex?.categories?.includes('AI') &&
-			x[1].description.codex?.subcategories?.AI?.includes('Vector Stores'),
-	);
-
-	if (vectorStores.length === 0) return {};
-
+	// Single-pass detection to minimize allocations: determine whether any node is a vector store
+	// (based on its node type description) and whether successful executions inserted/queried it.
 	const runData = run?.data?.resultData?.runData;
-	const succeededVectorStores = vectorStores.filter((x) =>
-		runData?.[x[0].name]?.some((execution) => execution.executionStatus === 'success'),
-	);
+	let foundVectorStore = false;
+	let insertedIntoVectorStore = false;
+	let queriedDataFromVectorStore = false;
 
-	const insertingVectorStores = succeededVectorStores.filter(
-		(x) => x[0].parameters?.mode === 'insert',
-	);
-	const retrievingVectorStores = succeededVectorStores.filter((x) =>
-		['retrieve-as-tool', 'retrieve', 'load'].find((y) => y === x[0].parameters?.mode),
-	);
+	// Use a small fast path set for retrieval modes
+	const retrieveModes = new Set(['retrieve-as-tool', 'retrieve', 'load']);
+
+	for (let i = 0, len = nodes.length; i < len; i++) {
+		const node = nodes[i];
+		const nodeType = nodeTypes.getByNameAndVersion(node.type, node.typeVersion);
+		// Keep same checks as original implementation
+		if (!nodeType?.description) continue;
+
+		const codex = nodeType.description.codex;
+		if (!codex?.categories?.includes('AI')) continue;
+		if (!codex.subcategories?.AI?.includes('Vector Stores')) continue;
+
+		foundVectorStore = true;
+
+		// If node has no run data entries, skip
+		const executions = runData?.[node.name];
+		if (!executions) {
+			// continue to next node
+			continue;
+		}
+
+		// Check if any execution succeeded
+		let hasSucceeded = false;
+		for (let j = 0, jlen = executions.length; j < jlen; j++) {
+			if (executions[j].executionStatus === 'success') {
+				hasSucceeded = true;
+				break;
+			}
+		}
+		if (!hasSucceeded) continue;
+
+		const mode = node.parameters?.mode;
+		if (mode === 'insert') insertedIntoVectorStore = true;
+		else if (retrieveModes.has(mode as string)) queriedDataFromVectorStore = true;
+
+		// Early exit if both metrics are satisfied
+		if (insertedIntoVectorStore && queriedDataFromVectorStore) {
+			return {
+				insertedIntoVectorStore: true,
+				queriedDataFromVectorStore: true,
+			};
+		}
+	}
+
+	// If there were no vector store nodes at all, return the same empty object as original
+	if (!foundVectorStore) return {};
 
 	return {
-		insertedIntoVectorStore: insertingVectorStores.length > 0,
-		queriedDataFromVectorStore: retrievingVectorStores.length > 0,
+		insertedIntoVectorStore,
+		queriedDataFromVectorStore,
 	};
 }
 
